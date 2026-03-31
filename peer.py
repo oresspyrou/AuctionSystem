@@ -4,6 +4,7 @@ import json
 import random
 import time
 import os
+import queue
 
 # ─────────────────────────────────────────────
 #  ΣΤΑΘΕΡΕΣ
@@ -12,22 +13,23 @@ SERVER_HOST = '127.0.0.1'
 SERVER_PORT = 5000
 BUFFER = 4096
 
-# Ο peer επιλέγει τυχαία θύρα για το δικό του server socket
 PEER_HOST = '127.0.0.1'
 PEER_PORT = random.randint(6000, 9000)
 
-SHARED_DIR = "shared_directory"   # τοπικός φάκελος αντικειμένων
+SHARED_DIR = "shared_directory"
 
 
 # ─────────────────────────────────────────────
 #  ΚΑΤΑΣΤΑΣΗ PEER
 # ─────────────────────────────────────────────
-token_id = None          # μετά το login
-peer_username = None     # username μετά το login
-server_conn = None       # socket προς Auction Server
+token_id       = None
+peer_username  = None
+server_conn    = None
 
-# Lock για thread-safe αποστολή στον server (menu thread + listener thread)
-send_lock = threading.Lock()
+send_lock      = threading.Lock()   # προστατεύει το sendall
+request_lock   = threading.Lock()   # εξασφαλίζει ένα request τη φορά
+response_queue = queue.Queue()      # απαντήσεις από τον server
+polling_started = False             # για να μην ξεκινήσουμε δύο φορές το polling
 
 
 # ─────────────────────────────────────────────
@@ -59,6 +61,21 @@ def recv_msg(conn) -> dict | None:
         return None
 
 
+def send_request(conn: socket.socket, data: dict) -> dict | None:
+    """
+    Thread-safe αποστολή request και αναμονή για απάντηση μέσω response_queue.
+    Μόνο ένα request μπορεί να είναι in-flight κάθε φορά — αποτρέπει race condition
+    μεταξύ main thread και background threads που χρησιμοποιούν το ίδιο socket.
+    """
+    with request_lock:
+        send_msg(conn, data)
+        try:
+            return response_queue.get(timeout=10)
+        except queue.Empty:
+            print("[PEER] Timeout: δεν ήρθε απάντηση από τον server.")
+            return None
+
+
 def connect_to_server() -> socket.socket:
     """Δημιουργεί σύνδεση με τον Auction Server."""
     conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -80,53 +97,52 @@ def ensure_shared_dir():
 def register(conn):
     username = input("  Username: ").strip()
     password = input("  Password: ").strip()
-    send_msg(conn, {"action": "register", "username": username, "password": password})
-    resp = recv_msg(conn)
-    print(f"[PEER] Register → {resp.get('message')}")
-    return resp.get("status") == "ok"
+    resp = send_request(conn, {"action": "register", "username": username, "password": password})
+    print(f"[PEER] Register → {resp.get('message') if resp else 'Χωρίς απόκριση'}")
+    return resp.get("status") == "ok" if resp else False
 
 
 def login(conn):
-    global token_id, peer_username
+    global token_id, peer_username, polling_started
     username = input("  Username: ").strip()
     password = input("  Password: ").strip()
-    send_msg(conn, {
-        "action": "login",
-        "username": username,
-        "password": password,
-        "peer_port": PEER_PORT
+    resp = send_request(conn, {
+        "action":    "login",
+        "username":  username,
+        "password":  password,
+        "peer_port": PEER_PORT,
     })
-    resp = recv_msg(conn)
-    print(f"[PEER] Login → {resp.get('message')}")
-    if resp.get("status") == "ok":
-        token_id     = resp.get("token_id")
+    print(f"[PEER] Login → {resp.get('message') if resp else 'Χωρίς απόκριση'}")
+    if resp and resp.get("status") == "ok":
+        token_id      = resp.get("token_id")
         peer_username = username
         print(f"[PEER] Token: {token_id}")
+        # Εκκίνηση αυτόματου polling μόνο μία φορά
+        if not polling_started:
+            threading.Thread(target=auction_polling_loop, args=(conn,), daemon=True).start()
+            polling_started = True
         return True
     return False
 
 
 def logout(conn):
     global token_id, peer_username
-    send_msg(conn, {"action": "logout", "token_id": token_id})
-    resp = recv_msg(conn)
-    print(f"[PEER] Logout → {resp.get('message')}")
-    token_id     = None
+    resp = send_request(conn, {"action": "logout", "token_id": token_id})
+    print(f"[PEER] Logout → {resp.get('message') if resp else 'Χωρίς απόκριση'}")
+    token_id      = None
     peer_username = None
 
 
 # ─────────────────────────────────────────────
-#  ASYNC LISTENER — διαβάζει inbound μηνύματα
-#  από τον server σε background thread
+#  ASYNC LISTENER — διαβάζει ΟΛΑ τα inbound μηνύματα
 # ─────────────────────────────────────────────
 
 def server_listener(conn: socket.socket):
     """
-    Τρέχει σε background thread.
-    Διαβάζει ό,τι στέλνει ο server ασύγχρονα (push μηνύματα:
-    new_auction, bid_update, you_won, your_item_sold, auction_ended).
-    ΔΕΝ διαβάζει τις απαντήσεις σε request/response — αυτές τις
-    διαβάζει το κύριο thread αμέσως μετά από κάθε send_msg.
+    Τρέχει σε background thread και είναι ο ΜΟΝΟΣ που καλεί recv_msg(server_conn).
+    - Μηνύματα χωρίς "action" (responses): προωθούνται στο response_queue
+    - Μηνύματα με "action" (push): χειρίζονται άμεσα εδώ
+    Έτσι εξαλείφεται το race condition μεταξύ listener και main thread.
     """
     while True:
         msg = recv_msg(conn)
@@ -136,8 +152,12 @@ def server_listener(conn: socket.socket):
 
         action = msg.get("action")
 
-        if action == "new_auction":
-            print(f"\n\n[PEER] *** ΝΕΑ ΔΗΜΟΠΡΑΣΙΑ ***")
+        if action is None:
+            # Απάντηση σε request — προωθούμε στον αναμένοντα thread
+            response_queue.put(msg)
+
+        elif action == "new_auction":
+            print(f"\n[PEER] *** ΝΕΑ ΔΗΜΟΠΡΑΣΙΑ ***")
             print(f"  Αντικείμενο : {msg.get('object_id')}")
             print(f"  Περιγραφή   : {msg.get('description')}")
             print(f"  Τιμή εκκίνησης: {msg.get('start_bid')}")
@@ -159,12 +179,8 @@ def server_listener(conn: socket.socket):
             print(f"  Αντικείμενο : {msg.get('object_id')} | Τιμή: {msg.get('winning_bid')}")
             print(f"  Πωλητής     : {msg.get('seller_username')} "
                   f"@ {msg.get('seller_ip')}:{msg.get('seller_port')}")
-            # Εκκίνηση transaction αυτόματα σε background thread
-            threading.Thread(
-                target=do_transaction,
-                args=(msg,),
-                daemon=True
-            ).start()
+            # Transaction σε ξεχωριστό thread για να μην μπλοκάρει τον listener
+            threading.Thread(target=do_transaction, args=(msg,), daemon=True).start()
             print("Επιλογή: ", end="", flush=True)
 
         elif action == "your_item_sold":
@@ -188,8 +204,7 @@ def server_listener(conn: socket.socket):
 
 def get_current_auction(conn: socket.socket):
     """Ρωτά τον server ποιο αντικείμενο δημοπρατείται τώρα."""
-    send_msg(conn, {"action": "get_current_auction", "token_id": token_id})
-    resp = recv_msg(conn)
+    resp = send_request(conn, {"action": "get_current_auction", "token_id": token_id})
     if resp and resp.get("active"):
         print(f"[PEER] Τρέχουσα δημοπρασία: {resp.get('object_id')} — {resp.get('description')}")
     else:
@@ -198,8 +213,7 @@ def get_current_auction(conn: socket.socket):
 
 def get_auction_details(conn: socket.socket):
     """Ζητά λεπτομέρειες για την τρέχουσα δημοπρασία."""
-    send_msg(conn, {"action": "get_auction_details", "token_id": token_id})
-    resp = recv_msg(conn)
+    resp = send_request(conn, {"action": "get_auction_details", "token_id": token_id})
     if resp and resp.get("active"):
         print(f"[PEER] Λεπτομέρειες δημοπρασίας:")
         print(f"  Αντικείμενο   : {resp.get('object_id')}")
@@ -214,35 +228,89 @@ def get_auction_details(conn: socket.socket):
 
 
 def place_bid(conn: socket.socket):
-    """Κάνει νέα προσφορά για την τρέχουσα δημοπρασία."""
-    # Πρώτα παίρνουμε τις λεπτομέρειες για να υπολογίσουμε το NewBid
+    """Κάνει νέα προσφορά για την τρέχουσα δημοπρασία (manual από μενού)."""
     details = get_auction_details(conn)
     if details is None:
         return
 
-    current_bid   = float(details.get("current_bid", 0))
-    seller_token  = details.get("seller_token")
-    object_id     = details.get("object_id")
+    current_bid = float(details.get("current_bid", 0))
+    object_id   = details.get("object_id")
 
-    # Έλεγχος ενδιαφέροντος: 60% πιθανότητα (εκφώνηση)
+    # 60% ενδιαφέρον (εκφώνηση)
     interested = random.random() < 0.60
     print(f"[PEER] Ενδιαφέρον για αγορά; {'ΝΑΙ' if interested else 'ΟΧΙ'}")
     if not interested:
         return
 
-    # Υπολογισμός νέας προσφοράς: NewBid = HighestBid * (1 + RAND/10)
+    # NewBid = HighestBid * (1 + RAND/10)
     new_bid = round(current_bid * (1 + random.random() / 10), 2)
     print(f"[PEER] Στέλνω προσφορά: {new_bid} για {object_id}")
 
-    send_msg(conn, {
+    resp = send_request(conn, {
         "action":    "place_bid",
         "token_id":  token_id,
         "object_id": object_id,
         "bid":       new_bid,
     })
-    resp = recv_msg(conn)
     if resp:
         print(f"[PEER] PlaceBid → {resp.get('message')}")
+
+
+# ─────────────────────────────────────────────
+#  ΑΥΤΟΜΑΤΟ POLLING — getCurrentAuction κάθε 60s
+#  Υλοποιεί τη ροή της εκφώνησης:
+#  getCurrentAuction → (60%) getAuctionDetails → placeBid
+# ─────────────────────────────────────────────
+
+def auction_polling_loop(conn: socket.socket):
+    """
+    Background thread: κάθε 60s ρωτά για τρέχουσα δημοπρασία.
+    Αν υπάρχει, με 60% πιθανότητα ζητά λεπτομέρειες και κάνει αυτόματη προσφορά.
+    """
+    while True:
+        time.sleep(60)
+        if token_id is None:
+            continue
+
+        # Βήμα 1: getCurrentAuction
+        resp = send_request(conn, {"action": "get_current_auction", "token_id": token_id})
+        if not resp or not resp.get("active"):
+            continue
+
+        print(f"\n[PEER] [Auto] Τρέχουσα δημοπρασία: "
+              f"{resp.get('object_id')} — {resp.get('description')}")
+
+        # Βήμα 2: coin flip 60% ενδιαφέρον
+        if random.random() >= 0.60:
+            print("[PEER] [Auto] Δεν ενδιαφέρομαι για αυτή τη δημοπρασία.")
+            print("Επιλογή: ", end="", flush=True)
+            continue
+
+        print("[PEER] [Auto] Ενδιαφέρομαι! Ζητώ λεπτομέρειες...")
+
+        # Βήμα 3: getAuctionDetails
+        details = send_request(conn, {"action": "get_auction_details", "token_id": token_id})
+        if not details or not details.get("active"):
+            continue
+
+        print(f"[PEER] [Auto] Τιμή: {details.get('current_bid')} | "
+              f"Χρόνος: {details.get('time_remaining')}s")
+
+        # Βήμα 4: placeBid — NewBid = HighestBid * (1 + RAND/10)
+        current_bid = float(details.get("current_bid", 0))
+        new_bid     = round(current_bid * (1 + random.random() / 10), 2)
+        object_id   = details.get("object_id")
+
+        print(f"[PEER] [Auto] Στέλνω προσφορά: {new_bid} για {object_id}")
+        result = send_request(conn, {
+            "action":    "place_bid",
+            "token_id":  token_id,
+            "object_id": object_id,
+            "bid":       new_bid,
+        })
+        if result:
+            print(f"[PEER] [Auto] PlaceBid → {result.get('message')}")
+        print("Επιλογή: ", end="", flush=True)
 
 
 # ─────────────────────────────────────────────
@@ -250,16 +318,10 @@ def place_bid(conn: socket.socket):
 # ─────────────────────────────────────────────
 
 def generate_objects(peer_id: str) -> list:
-    """
-    Παράγει αντικείμενα σύμφωνα με την εκφώνηση:
-    - Το 1ο αντικείμενο παράγεται μετά από RAND*120 sec
-    - Κάθε επόμενο μετά από νέο RAND*120 sec από το προηγούμενο
-    Εδώ το καλούμε χωρίς αναμονή (παράγουμε αντικείμενα άμεσα για demo).
-    Η αναμονή γίνεται στο background thread generate_objects_loop.
-    """
-    obj_id = f"Object_{peer_id}_{int(time.time())}"
+    """Παράγει ένα αντικείμενο και το αποθηκεύει στο shared_directory."""
+    obj_id    = f"Object_{peer_id}_{int(time.time())}"
     start_bid = round(random.uniform(10, 500), 2)
-    duration  = random.choice([20, 30, 45, 60])   # δευτερόλεπτα
+    duration  = random.choice([20, 30, 45, 60])
 
     obj = {
         "object_id":        obj_id,
@@ -268,13 +330,12 @@ def generate_objects(peer_id: str) -> list:
         "auction_duration": duration,
     }
 
-    # Αποθήκευση στο shared_directory
     filepath = os.path.join(SHARED_DIR, f"{obj_id}.txt")
     with open(filepath, 'w', encoding='utf-8') as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-    print(f"[PEER] Παράχθηκε αντικείμενο: {obj_id} | Τιμή εκκίνησης: {start_bid} | "
-          f"Διάρκεια δημοπρασίας: {duration}s")
+    print(f"[PEER] Παράχθηκε αντικείμενο: {obj_id} | "
+          f"Τιμή εκκίνησης: {start_bid} | Διάρκεια: {duration}s")
     return [obj]
 
 
@@ -289,7 +350,7 @@ def generate_objects_loop(peer_id: str, conn: socket.socket):
         time.sleep(wait_time)
 
         if token_id is None:
-            continue   # δεν είμαστε logged in, παραλείπουμε
+            continue
 
         objects = generate_objects(peer_id)
         request_auction(conn, objects)
@@ -301,12 +362,11 @@ def request_auction(conn: socket.socket, objects: list):
         print("[PEER] Πρέπει να είσαι logged in για request_auction.")
         return
 
-    send_msg(conn, {
+    resp = send_request(conn, {
         "action":   "request_auction",
         "token_id": token_id,
         "objects":  objects,
     })
-    resp = recv_msg(conn)
     if resp:
         print(f"[PEER] RequestAuction → {resp.get('message')}")
 
@@ -337,7 +397,7 @@ def do_transaction(win_msg: dict):
         conn.settimeout(10)
         conn.connect((seller_ip, int(seller_port)))
 
-        # Στέλνουμε αίτημα αγοράς
+        # Αυτή η σύνδεση είναι peer-to-peer — χρησιμοποιούμε send_msg/recv_msg απευθείας
         send_msg(conn, {
             "action":      "transaction_buy",
             "object_id":   object_id,
@@ -345,7 +405,6 @@ def do_transaction(win_msg: dict):
             "buyer":       peer_username,
         })
 
-        # Παραλαμβάνουμε το αρχείο metadata
         resp = recv_msg(conn)
         conn.close()
 
@@ -355,24 +414,25 @@ def do_transaction(win_msg: dict):
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(metadata)
             print(f"[PEER] Transaction επιτυχής! Αρχείο αποθηκεύτηκε: {filepath}")
-
-            # Ενημέρωση server ότι ο αγοραστής έχει πλέον το αντικείμενο
             notify_server_bought(object_id)
         else:
-            print(f"[PEER] Transaction απέτυχε: {resp.get('message') if resp else 'Χωρίς απόκριση'}")
+            print(f"[PEER] Transaction απέτυχε: "
+                  f"{resp.get('message') if resp else 'Χωρίς απόκριση'}")
 
     except Exception as e:
         print(f"[PEER] Transaction error: {e}")
 
 
 def notify_server_bought(object_id: str):
-    """Ενημερώνει τον server ότι ο αγοραστής έχει παραλάβει το αντικείμενο."""
+    """
+    Ενημερώνει τον server ότι ο αγοραστής έχει παραλάβει το αντικείμενο.
+    Χρησιμοποιεί send_msg (όχι send_request) γιατί ο server δεν στέλνει απάντηση.
+    """
     send_msg(server_conn, {
         "action":    "confirm_purchase",
         "token_id":  token_id,
         "object_id": object_id,
     })
-    # Η απάντηση θα έρθει ως push μήνυμα — δεν χρειάζεται recv εδώ
 
 
 # ─────────────────────────────────────────────
@@ -391,8 +451,7 @@ def peer_server_loop():
     while True:
         try:
             conn, addr = srv.accept()
-            t = threading.Thread(target=handle_incoming, args=(conn, addr), daemon=True)
-            t.start()
+            threading.Thread(target=handle_incoming, args=(conn, addr), daemon=True).start()
         except Exception as e:
             print(f"[PEER] Peer server error: {e}")
             break
@@ -410,20 +469,16 @@ def handle_incoming(conn, addr):
 
     if action == "check_active":
         send_msg(conn, {"status": "ok", "message": "Ο peer είναι ενεργός."})
-
     elif action == "transaction_buy":
         handle_sell(conn, msg)
-
-    # Τα υπόλοιπα push μηνύματα (new_auction, bid_update, κτλ.)
-    # τα χειρίζεται ο server_listener thread — όχι εδώ.
 
     conn.close()
 
 
 def handle_sell(conn, msg):
-    """Στέλνει το αρχείο metadata στον αγοραστή."""
+    """Στέλνει το αρχείο metadata στον αγοραστή και το διαγράφει τοπικά."""
     object_id = msg.get("object_id")
-    filepath = os.path.join(SHARED_DIR, f"{object_id}.txt")
+    filepath  = os.path.join(SHARED_DIR, f"{object_id}.txt")
 
     if not os.path.exists(filepath):
         send_msg(conn, {"status": "error", "message": "Αρχείο δεν βρέθηκε."})
@@ -455,7 +510,7 @@ def main():
     server_conn = connect_to_server()
     print(f"[PEER] Συνδέθηκε στον Auction Server {SERVER_HOST}:{SERVER_PORT}")
 
-    # Εκκίνηση async listener για push μηνύματα από τον server
+    # Ο server_listener είναι ο ΜΟΝΟΣ που διαβάζει από το server_conn
     threading.Thread(target=server_listener, args=(server_conn,), daemon=True).start()
 
     while True:
