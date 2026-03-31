@@ -307,14 +307,10 @@ def handle_confirm_purchase(conn, msg):
         username = active_sessions[token]["username"]
 
     print(f"[SERVER] Επιβεβαίωση αγοράς: {username} παρέλαβε {object_id}")
-    # Εδώ θα μπορούσαμε να ενημερώσουμε auction_history αν θέλουμε persistence
-    send_msg(conn, {
-        "status":  "ok",
-        "message": f"Αγορά {object_id} επιβεβαιώθηκε."
-    })
+    # Δεν στέλνουμε απάντηση — ο peer δεν περιμένει recv για αυτό το μήνυμα
 
 
-
+def cancel_auction(reason: str):
     """
     Ακυρώνει την τρέχουσα δημοπρασία και ενημερώνει όλους τους peers.
     Καλείται όταν ο πωλητής αποσυνδεθεί.
@@ -357,7 +353,7 @@ def check_active_seller(seller_token: str) -> bool:
         return False
 
 
-
+def broadcast_to_active_peers(msg: dict, exclude_token: str = None):
     """Στέλνει μήνυμα σε όλους τους ενεργούς peers (εκτός από τον exclude_token)."""
     with lock:
         sessions_snapshot = dict(active_sessions)
