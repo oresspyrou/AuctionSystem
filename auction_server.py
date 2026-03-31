@@ -162,12 +162,18 @@ def handle_logout(conn, msg):
 
     with lock:
         session = active_sessions.pop(token, None)
+        # Ελέγχουμε αν ο peer που αποχωρεί είναι ο τρέχων πωλητής
+        is_seller = (current_auction is not None and
+                     current_auction["seller_token"] == token)
 
     if session is None:
         send_msg(conn, {"status": "error", "message": "Άγνωστο token_id."})
     else:
         print(f"[SERVER] Logout: {session['username']}")
         send_msg(conn, {"status": "ok", "message": "Logout επιτυχής."})
+        # Αν ήταν ο πωλητής, ακυρώνουμε την τρέχουσα δημοπρασία
+        if is_seller:
+            cancel_auction("Ο πωλητής αποσυνδέθηκε (logout).")
 
 
 # ─────────────────────────────────────────────
