@@ -93,6 +93,12 @@ def handle_peer(conn, addr):
                 handle_logout(conn, msg)
             elif action == "request_auction":
                 handle_request_auction(conn, msg)
+            elif action == "get_current_auction":
+                handle_get_current_auction(conn, msg)
+            elif action == "get_auction_details":
+                handle_get_auction_details(conn, msg)
+            elif action == "place_bid":
+                handle_place_bid(conn, msg)
             else:
                 send_msg(conn, {"status": "error", "message": f"Άγνωστη action: {action}"})
 
@@ -196,6 +202,92 @@ def handle_request_auction(conn, msg):
         "status": "ok",
         "message": f"{added} αντικείμενα προστέθηκαν στην ουρά."
     })
+
+
+def handle_get_current_auction(conn, msg):
+    """Επιστρέφει το object_id και description της τρέχουσας δημοπρασίας."""
+    token = msg.get("token_id", "")
+    with lock:
+        if token not in active_sessions:
+            send_msg(conn, {"status": "error", "message": "Μη έγκυρο token_id."})
+            return
+        if current_auction is None:
+            send_msg(conn, {"status": "ok", "active": False,
+                            "message": "Δεν υπάρχει ενεργή δημοπρασία αυτή τη στιγμή."})
+        else:
+            send_msg(conn, {
+                "status":      "ok",
+                "active":      True,
+                "object_id":   current_auction["object_id"],
+                "description": current_auction["description"],
+            })
+
+
+def handle_get_auction_details(conn, msg):
+    """Επιστρέφει πλήρεις λεπτομέρειες τρέχουσας δημοπρασίας."""
+    token = msg.get("token_id", "")
+    with lock:
+        if token not in active_sessions:
+            send_msg(conn, {"status": "error", "message": "Μη έγκυρο token_id."})
+            return
+        if current_auction is None:
+            send_msg(conn, {"status": "ok", "active": False,
+                            "message": "Δεν υπάρχει ενεργή δημοπρασία."})
+            return
+        remaining = max(0.0, current_auction["end_time"] - time.time())
+        send_msg(conn, {
+            "status":          "ok",
+            "active":          True,
+            "object_id":       current_auction["object_id"],
+            "description":     current_auction["description"],
+            "current_bid":     current_auction["current_bid"],
+            "seller_token":    current_auction["seller_token"],
+            "seller_username": current_auction["seller_username"],
+            "time_remaining":  round(remaining, 1),
+        })
+
+
+def handle_place_bid(conn, msg):
+    """Δέχεται νέα προσφορά από peer και ενημερώνει όλους αν είναι υψηλότερη."""
+    token    = msg.get("token_id", "")
+    object_id = msg.get("object_id", "")
+    bid      = float(msg.get("bid", 0))
+
+    with lock:
+        if token not in active_sessions:
+            send_msg(conn, {"status": "error", "message": "Μη έγκυρο token_id."})
+            return
+        if current_auction is None:
+            send_msg(conn, {"status": "error", "message": "Δεν υπάρχει ενεργή δημοπρασία."})
+            return
+        if current_auction["object_id"] != object_id:
+            send_msg(conn, {"status": "error", "message": "Λάθος object_id."})
+            return
+        if token == current_auction["seller_token"]:
+            send_msg(conn, {"status": "error", "message": "Δεν μπορείς να κάνεις προσφορά στο δικό σου αντικείμενο."})
+            return
+        if bid <= current_auction["current_bid"]:
+            send_msg(conn, {
+                "status":  "error",
+                "message": f"Η προσφορά πρέπει να είναι > {current_auction['current_bid']}."
+            })
+            return
+
+        # Αποδεκτή προσφορά — ενημέρωση δημοπρασίας
+        current_auction["current_bid"]          = bid
+        current_auction["highest_bidder_token"] = token
+        username = active_sessions[token]["username"]
+
+    print(f"[SERVER] Νέα προσφορά: {bid} από {username} για {object_id}")
+    send_msg(conn, {"status": "ok", "message": f"Προσφορά {bid} έγινε δεκτή."})
+
+    # Broadcast νέας προσφοράς σε όλους τους peers
+    broadcast_to_active_peers({
+        "action":    "bid_update",
+        "object_id": object_id,
+        "new_bid":   bid,
+        "bidder":    username,
+    }, exclude_token=token)
 
 
 def broadcast_to_active_peers(msg: dict, exclude_token: str = None):
