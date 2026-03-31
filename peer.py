@@ -109,6 +109,72 @@ def logout(conn):
 
 
 # ─────────────────────────────────────────────
+#  ΠΑΡΑΓΩΓΗ ΑΝΤΙΚΕΙΜΕΝΩΝ & REQUEST AUCTION
+# ─────────────────────────────────────────────
+
+def generate_objects(peer_id: str) -> list:
+    """
+    Παράγει αντικείμενα σύμφωνα με την εκφώνηση:
+    - Το 1ο αντικείμενο παράγεται μετά από RAND*120 sec
+    - Κάθε επόμενο μετά από νέο RAND*120 sec από το προηγούμενο
+    Εδώ το καλούμε χωρίς αναμονή (παράγουμε αντικείμενα άμεσα για demo).
+    Η αναμονή γίνεται στο background thread generate_objects_loop.
+    """
+    obj_id = f"Object_{peer_id}_{int(time.time())}"
+    start_bid = round(random.uniform(10, 500), 2)
+    duration  = random.choice([20, 30, 45, 60])   # δευτερόλεπτα
+
+    obj = {
+        "object_id":        obj_id,
+        "description":      f"Αντικείμενο {obj_id} από peer {peer_id}",
+        "start_bid":        start_bid,
+        "auction_duration": duration,
+    }
+
+    # Αποθήκευση στο shared_directory
+    filepath = os.path.join(SHARED_DIR, f"{obj_id}.txt")
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+    print(f"[PEER] Παράχθηκε αντικείμενο: {obj_id} | Τιμή εκκίνησης: {start_bid} | "
+          f"Διάρκεια δημοπρασίας: {duration}s")
+    return [obj]
+
+
+def generate_objects_loop(peer_id: str, conn: socket.socket):
+    """
+    Background thread: παράγει αντικείμενα σε τυχαία διαστήματα (RAND*120s)
+    και τα στέλνει αυτόματα στον server μέσω request_auction.
+    """
+    while True:
+        wait_time = random.random() * 120   # RAND * 120 sec
+        print(f"[PEER] Επόμενο αντικείμενο σε {wait_time:.1f}s...")
+        time.sleep(wait_time)
+
+        if token_id is None:
+            continue   # δεν είμαστε logged in, παραλείπουμε
+
+        objects = generate_objects(peer_id)
+        request_auction(conn, objects)
+
+
+def request_auction(conn: socket.socket, objects: list):
+    """Στέλνει λίστα αντικειμένων στον server για δημοπράτηση."""
+    if token_id is None:
+        print("[PEER] Πρέπει να είσαι logged in για request_auction.")
+        return
+
+    send_msg(conn, {
+        "action":   "request_auction",
+        "token_id": token_id,
+        "objects":  objects,
+    })
+    resp = recv_msg(conn)
+    if resp:
+        print(f"[PEER] RequestAuction → {resp.get('message')}")
+
+
+# ─────────────────────────────────────────────
 #  SERVER SOCKET ΤΟΥ PEER
 #  (ακούει για peer-to-peer συνδέσεις & check_active)
 # ─────────────────────────────────────────────
@@ -142,16 +208,36 @@ def handle_incoming(conn, addr):
     print(f"[PEER] Εισερχόμενο action='{action}' από {addr}")
 
     if action == "check_active":
-        # Ο server ελέγχει αν είμαστε online
         send_msg(conn, {"status": "ok", "message": "Ο peer είναι ενεργός."})
 
     elif action == "transaction_buy":
-        # Κάποιος αγοραστής ζητά το αρχείο metadata (ρόλος πωλητή)
         handle_sell(conn, msg)
 
-    elif action == "auction_result":
-        # Ο server μας ενημερώνει ότι κερδίσαμε δημοπρασία (ρόλος αγοραστή)
-        print(f"[PEER] 🎉 Κερδίσαμε δημοπρασία! {msg}")
+    elif action == "new_auction":
+        # Ο server ανακοινώνει νέα δημοπρασία
+        print(f"\n[PEER] *** ΝΕΑ ΔΗΜΟΠΡΑΣΙΑ ***")
+        print(f"  Αντικείμενο: {msg.get('object_id')}")
+        print(f"  Περιγραφή:   {msg.get('description')}")
+        print(f"  Τιμή εκκίνησης: {msg.get('start_bid')}")
+        print(f"  Διάρκεια: {msg.get('duration')}s")
+
+    elif action == "you_won":
+        print(f"\n[PEER] *** ΚΕΡΔΙΣΕΣ τη δημοπρασία! ***")
+        print(f"  Αντικείμενο: {msg.get('object_id')} | Τιμή: {msg.get('winning_bid')}")
+        print(f"  Πωλητής: {msg.get('seller_username')} @ {msg.get('seller_ip')}:{msg.get('seller_port')}")
+
+    elif action == "your_item_sold":
+        print(f"\n[PEER] *** Το αντικείμενό σου πουλήθηκε! ***")
+        print(f"  Αντικείμενο: {msg.get('object_id')} | Τιμή: {msg.get('winning_bid')}")
+        print(f"  Αγοραστής: {msg.get('buyer_username')}")
+
+    elif action == "auction_ended":
+        result = msg.get("result")
+        if result == "no_bids":
+            print(f"\n[PEER] Δημοπρασία {msg.get('object_id')} έληξε χωρίς προσφορά.")
+        else:
+            print(f"\n[PEER] Δημοπρασία {msg.get('object_id')} ολοκληρώθηκε. "
+                  f"Τιμή πώλησης: {msg.get('winning_bid')}")
 
     conn.close()
 
@@ -181,6 +267,10 @@ def main():
     global server_conn
     ensure_shared_dir()
 
+    # Μοναδικό ID για αυτό το peer instance (για ονομασία αντικειμένων)
+    peer_id = str(random.randint(1000, 9999))
+    print(f"[PEER] Peer ID: {peer_id} | Port: {PEER_PORT}")
+
     # Εκκίνηση peer server σε background thread
     t = threading.Thread(target=peer_server_loop, daemon=True)
     t.start()
@@ -194,18 +284,49 @@ def main():
         print("1. Register")
         print("2. Login")
         print("3. Logout")
+        print("4. Δημιούργησε & στείλε αντικείμενο τώρα (manual)")
+        print("5. Εκκίνηση αυτόματης παραγωγής αντικειμένων (RAND×120s)")
         print("0. Έξοδος")
         choice = input("Επιλογή: ").strip()
 
         if choice == "1":
             register(server_conn)
         elif choice == "2":
-            login(server_conn)
+            if login(server_conn):
+                # Αμέσως μετά το login στέλνουμε τα αντικείμενα που ήδη υπάρχουν
+                existing = []
+                for fname in os.listdir(SHARED_DIR):
+                    if fname.endswith(".txt"):
+                        with open(os.path.join(SHARED_DIR, fname), 'r', encoding='utf-8') as f:
+                            try:
+                                existing.append(json.load(f))
+                            except Exception:
+                                pass
+                if existing:
+                    print(f"[PEER] Βρέθηκαν {len(existing)} αντικείμενα στο shared_dir — στέλνονται στον server.")
+                    request_auction(server_conn, existing)
         elif choice == "3":
             if token_id:
                 logout(server_conn)
             else:
                 print("[PEER] Δεν είσαι συνδεδεμένος.")
+        elif choice == "4":
+            if token_id:
+                objects = generate_objects(peer_id)
+                request_auction(server_conn, objects)
+            else:
+                print("[PEER] Κάνε login πρώτα.")
+        elif choice == "5":
+            if token_id:
+                t_gen = threading.Thread(
+                    target=generate_objects_loop,
+                    args=(peer_id, server_conn),
+                    daemon=True
+                )
+                t_gen.start()
+                print("[PEER] Αυτόματη παραγωγή αντικειμένων ενεργοποιήθηκε.")
+            else:
+                print("[PEER] Κάνε login πρώτα.")
         elif choice == "0":
             if token_id:
                 logout(server_conn)

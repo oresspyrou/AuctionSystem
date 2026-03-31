@@ -32,6 +32,9 @@ auction_queue = []
 #   "highest_bidder_token", "seller_token", "end_time" }
 current_auction = None
 
+# Condition για να ξυπνάει το auction thread όταν μπει νέο αντικείμενο στην ουρά
+auction_queue_condition = threading.Condition(lock)
+
 
 # ─────────────────────────────────────────────
 #  ΒΟΗΘΗΤΙΚΕΣ ΣΥΝΑΡΤΗΣΕΙΣ
@@ -88,6 +91,8 @@ def handle_peer(conn, addr):
                 handle_login(conn, msg, addr)
             elif action == "logout":
                 handle_logout(conn, msg)
+            elif action == "request_auction":
+                handle_request_auction(conn, msg)
             else:
                 send_msg(conn, {"status": "error", "message": f"Άγνωστη action: {action}"})
 
@@ -158,6 +163,163 @@ def handle_logout(conn, msg):
 
 
 # ─────────────────────────────────────────────
+#  ΛΕΙΤΟΥΡΓΙΕΣ ΔΗΜΟΠΡΑΣΙΑΣ
+# ─────────────────────────────────────────────
+
+def handle_request_auction(conn, msg):
+    """Ο peer στέλνει τα αντικείμενά του προς δημοπράτηση (μετά το login)."""
+    token = msg.get("token_id", "")
+    objects = msg.get("objects", [])   # λίστα από dicts με metadata
+
+    with auction_queue_condition:
+        session = active_sessions.get(token)
+        if session is None:
+            send_msg(conn, {"status": "error", "message": "Μη έγκυρο token_id."})
+            return
+
+        username = session["username"]
+        added = 0
+        for obj in objects:
+            # Προσθέτουμε το token_id του πωλητή σε κάθε αντικείμενο
+            obj["seller_token"] = token
+            obj["seller_username"] = username
+            auction_queue.append(obj)
+            added += 1
+
+        print(f"[SERVER] {username} πρόσθεσε {added} αντικείμενα στην ουρά. "
+              f"Συνολικά στην ουρά: {len(auction_queue)}")
+
+        # Ξυπνάμε το auction_loop αν περιμένει για νέο αντικείμενο
+        auction_queue_condition.notify_all()
+
+    send_msg(conn, {
+        "status": "ok",
+        "message": f"{added} αντικείμενα προστέθηκαν στην ουρά."
+    })
+
+
+def broadcast_to_active_peers(msg: dict, exclude_token: str = None):
+    """Στέλνει μήνυμα σε όλους τους ενεργούς peers (εκτός από τον exclude_token)."""
+    with lock:
+        sessions_snapshot = dict(active_sessions)
+
+    for token, session in sessions_snapshot.items():
+        if token == exclude_token:
+            continue
+        try:
+            send_msg(session["conn"], msg)
+        except Exception as e:
+            print(f"[SERVER] Αδυναμία αποστολής στον {session['username']}: {e}")
+
+
+def auction_loop():
+    """
+    Τρέχει σε ξεχωριστό thread.
+    Επιλέγει αντικείμενα από την ουρά (FCFS) και διεξάγει μία δημοπρασία κάθε φορά.
+    """
+    global current_auction
+
+    print("[SERVER] Auction loop ξεκίνησε.")
+
+    while True:
+        # ── Αναμονή για αντικείμενο στην ουρά ──
+        with auction_queue_condition:
+            while len(auction_queue) == 0:
+                print("[SERVER] Ουρά κενή — αναμονή για νέο αντικείμενο...")
+                auction_queue_condition.wait()
+
+            # Παίρνουμε το πρώτο αντικείμενο (FCFS)
+            item = auction_queue.pop(0)
+
+        duration = float(item.get("auction_duration", 30))  # δευτερόλεπτα
+        end_time = time.time() + duration
+
+        with lock:
+            current_auction = {
+                "object_id":           item["object_id"],
+                "description":         item.get("description", ""),
+                "start_bid":           float(item.get("start_bid", 0)),
+                "current_bid":         float(item.get("start_bid", 0)),
+                "highest_bidder_token": None,
+                "seller_token":        item["seller_token"],
+                "seller_username":     item["seller_username"],
+                "end_time":            end_time,
+            }
+
+        print(f"[SERVER] *** Νέα δημοπρασία: {item['object_id']} | "
+              f"Τιμή εκκίνησης: {item['start_bid']} | "
+              f"Διάρκεια: {duration}s ***")
+
+        # Ενημερώνουμε όλους τους peers για τη νέα δημοπρασία
+        broadcast_to_active_peers({
+            "action":      "new_auction",
+            "object_id":   current_auction["object_id"],
+            "description": current_auction["description"],
+            "start_bid":   current_auction["start_bid"],
+            "duration":    duration,
+        })
+
+        # ── Αναμονή μέχρι τη λήξη της δημοπρασίας ──
+        time.sleep(duration)
+
+        # ── Ανακοίνωση αποτελέσματος ──
+        with lock:
+            auction = current_auction
+            current_auction = None
+
+        if auction["highest_bidder_token"] is None:
+            print(f"[SERVER] Δημοπρασία {auction['object_id']} έληξε χωρίς προσφορά.")
+            broadcast_to_active_peers({
+                "action":    "auction_ended",
+                "object_id": auction["object_id"],
+                "result":    "no_bids",
+            })
+        else:
+            winner_token = auction["highest_bidder_token"]
+            seller_token = auction["seller_token"]
+            winning_bid  = auction["current_bid"]
+
+            print(f"[SERVER] Νικητής: token={winner_token} | "
+                  f"Τιμή: {winning_bid} | Αντικείμενο: {auction['object_id']}")
+
+            # Ενημέρωση νικητή
+            with lock:
+                winner_session = active_sessions.get(winner_token)
+                seller_session = active_sessions.get(seller_token)
+                # Ενημέρωση μετρητών
+                if winner_session:
+                    registered_users[winner_session["username"]]["num_auctions_bidder"] += 1
+                if seller_session:
+                    registered_users[seller_session["username"]]["num_auctions_seller"] += 1
+
+            if winner_session:
+                send_msg(winner_session["conn"], {
+                    "action":         "you_won",
+                    "object_id":      auction["object_id"],
+                    "winning_bid":    winning_bid,
+                    "seller_ip":      seller_session["ip"]   if seller_session else None,
+                    "seller_port":    seller_session["port"] if seller_session else None,
+                    "seller_username": auction["seller_username"],
+                })
+
+            if seller_session:
+                send_msg(seller_session["conn"], {
+                    "action":          "your_item_sold",
+                    "object_id":       auction["object_id"],
+                    "winning_bid":     winning_bid,
+                    "buyer_username":  winner_session["username"] if winner_session else "άγνωστος",
+                })
+
+            # Broadcast αποτελέσματος σε όλους
+            broadcast_to_active_peers({
+                "action":    "auction_ended",
+                "object_id": auction["object_id"],
+                "result":    "sold",
+                "winning_bid": winning_bid,
+            }, exclude_token=winner_token)
+
+
+# ─────────────────────────────────────────────
 #  ΚΥΡΙΟΣ SERVER LOOP
 # ─────────────────────────────────────────────
 
@@ -167,6 +329,10 @@ def start_server():
     server_sock.bind((HOST, PORT))
     server_sock.listen(10)
     print(f"[SERVER] Ακούει στο {HOST}:{PORT} ...")
+
+    # Εκκίνηση auction loop σε background thread
+    t_auction = threading.Thread(target=auction_loop, daemon=True)
+    t_auction.start()
 
     try:
         while True:
