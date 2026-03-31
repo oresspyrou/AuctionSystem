@@ -488,6 +488,11 @@ def auction_loop():
             auction = current_auction
             current_auction = None
 
+        # Αν η δημοπρασία ακυρώθηκε από άλλο thread (π.χ. handle_logout)
+        # ακριβώς πριν φτάσουμε εδώ, δεν υπάρχει τίποτα να ανακοινωθεί
+        if auction is None:
+            continue
+
         if auction["highest_bidder_token"] is None:
             print(f"[SERVER] Δημοπρασία {auction['object_id']} έληξε χωρίς προσφορά.")
             # Ο πωλητής συμμετείχε ως πωλητής — ενημέρωση μετρητή ακόμα και χωρίς προσφορές
