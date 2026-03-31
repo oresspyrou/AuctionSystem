@@ -107,6 +107,22 @@ def handle_peer(conn, addr):
     except Exception as e:
         print(f"[SERVER] Σφάλμα στο handle_peer {addr}: {e}")
     finally:
+        # Καθαρισμός session αν ο peer αποσυνδέθηκε χωρίς logout
+        disconnected_token = None
+        with lock:
+            for token, session in list(active_sessions.items()):
+                if session["conn"] is conn:
+                    disconnected_token = token
+                    active_sessions.pop(token)
+                    print(f"[SERVER] Καθαρισμός session: {session['username']} (socket drop)")
+                    break
+            is_seller = (disconnected_token is not None and
+                         current_auction is not None and
+                         current_auction["seller_token"] == disconnected_token)
+
+        if is_seller:
+            cancel_auction("Ο πωλητής αποσυνδέθηκε.")
+
         conn.close()
 
 
