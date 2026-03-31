@@ -207,12 +207,27 @@ def handle_request_auction(conn, msg):
 
 
 def handle_get_current_auction(conn, msg):
-    """Επιστρέφει το object_id και description της τρέχουσας δημοπρασίας."""
+    """Επιστρέφει το object_id και description της τρέχουσας δημοπρασίας.
+    Ελέγχει αν ο πωλητής είναι ακόμα online (checkActive) και ακυρώνει αν όχι."""
     token = msg.get("token_id", "")
     with lock:
         if token not in active_sessions:
             send_msg(conn, {"status": "error", "message": "Μη έγκυρο token_id."})
             return
+        if current_auction is None:
+            send_msg(conn, {"status": "ok", "active": False,
+                            "message": "Δεν υπάρχει ενεργή δημοπρασία αυτή τη στιγμή."})
+            return
+        seller_token = current_auction["seller_token"]
+
+    # checkActive — εκτός lock για να μην μπλοκάρουμε άλλα threads
+    if not check_active_seller(seller_token):
+        cancel_auction("Ο πωλητής αποσυνδέθηκε.")
+        send_msg(conn, {"status": "ok", "active": False,
+                        "message": "Η δημοπρασία ακυρώθηκε — ο πωλητής αποσυνδέθηκε."})
+        return
+
+    with lock:
         if current_auction is None:
             send_msg(conn, {"status": "ok", "active": False,
                             "message": "Δεν υπάρχει ενεργή δημοπρασία αυτή τη στιγμή."})
@@ -226,12 +241,27 @@ def handle_get_current_auction(conn, msg):
 
 
 def handle_get_auction_details(conn, msg):
-    """Επιστρέφει πλήρεις λεπτομέρειες τρέχουσας δημοπρασίας."""
+    """Επιστρέφει πλήρεις λεπτομέρειες τρέχουσας δημοπρασίας.
+    Ελέγχει αν ο πωλητής είναι ακόμα online (checkActive) και ακυρώνει αν όχι."""
     token = msg.get("token_id", "")
     with lock:
         if token not in active_sessions:
             send_msg(conn, {"status": "error", "message": "Μη έγκυρο token_id."})
             return
+        if current_auction is None:
+            send_msg(conn, {"status": "ok", "active": False,
+                            "message": "Δεν υπάρχει ενεργή δημοπρασία."})
+            return
+        seller_token = current_auction["seller_token"]
+
+    # checkActive — εκτός lock για να μην μπλοκάρουμε άλλα threads
+    if not check_active_seller(seller_token):
+        cancel_auction("Ο πωλητής αποσυνδέθηκε.")
+        send_msg(conn, {"status": "ok", "active": False,
+                        "message": "Η δημοπρασία ακυρώθηκε — ο πωλητής αποσυνδέθηκε."})
+        return
+
+    with lock:
         if current_auction is None:
             send_msg(conn, {"status": "ok", "active": False,
                             "message": "Δεν υπάρχει ενεργή δημοπρασία."})
