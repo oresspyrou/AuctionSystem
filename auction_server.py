@@ -441,6 +441,11 @@ def auction_loop():
 
         if auction["highest_bidder_token"] is None:
             print(f"[SERVER] Δημοπρασία {auction['object_id']} έληξε χωρίς προσφορά.")
+            # Ο πωλητής συμμετείχε ως πωλητής — ενημέρωση μετρητή ακόμα και χωρίς προσφορές
+            with lock:
+                seller_session = active_sessions.get(auction["seller_token"])
+                if seller_session:
+                    registered_users[seller_session["username"]]["num_auctions_seller"] += 1
             broadcast_to_active_peers({
                 "action":    "auction_ended",
                 "object_id": auction["object_id"],
@@ -454,7 +459,6 @@ def auction_loop():
             print(f"[SERVER] Νικητής: token={winner_token} | "
                   f"Τιμή: {winning_bid} | Αντικείμενο: {auction['object_id']}")
 
-            # Ενημέρωση νικητή
             with lock:
                 winner_session = active_sessions.get(winner_token)
                 seller_session = active_sessions.get(seller_token)
