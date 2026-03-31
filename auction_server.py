@@ -99,6 +99,8 @@ def handle_peer(conn, addr):
                 handle_get_auction_details(conn, msg)
             elif action == "place_bid":
                 handle_place_bid(conn, msg)
+            elif action == "confirm_purchase":
+                handle_confirm_purchase(conn, msg)
             else:
                 send_msg(conn, {"status": "error", "message": f"Άγνωστη action: {action}"})
 
@@ -290,7 +292,72 @@ def handle_place_bid(conn, msg):
     }, exclude_token=token)
 
 
-def broadcast_to_active_peers(msg: dict, exclude_token: str = None):
+def handle_confirm_purchase(conn, msg):
+    """
+    Ο αγοραστής ενημερώνει τον server ότι παρέλαβε το αντικείμενο.
+    Ο server ενημερώνει τις δομές δεδομένων.
+    """
+    token     = msg.get("token_id", "")
+    object_id = msg.get("object_id", "")
+
+    with lock:
+        if token not in active_sessions:
+            send_msg(conn, {"status": "error", "message": "Μη έγκυρο token_id."})
+            return
+        username = active_sessions[token]["username"]
+
+    print(f"[SERVER] Επιβεβαίωση αγοράς: {username} παρέλαβε {object_id}")
+    # Εδώ θα μπορούσαμε να ενημερώσουμε auction_history αν θέλουμε persistence
+    send_msg(conn, {
+        "status":  "ok",
+        "message": f"Αγορά {object_id} επιβεβαιώθηκε."
+    })
+
+
+
+    """
+    Ακυρώνει την τρέχουσα δημοπρασία και ενημερώνει όλους τους peers.
+    Καλείται όταν ο πωλητής αποσυνδεθεί.
+    """
+    global current_auction
+    with lock:
+        if current_auction is None:
+            return
+        object_id = current_auction["object_id"]
+        current_auction = None
+
+    print(f"[SERVER] Ακύρωση δημοπρασίας {object_id}: {reason}")
+    broadcast_to_active_peers({
+        "action":    "auction_cancelled",
+        "object_id": object_id,
+        "reason":    reason,
+    })
+
+
+def check_active_seller(seller_token: str) -> bool:
+    """
+    Ελέγχει αν ο πωλητής είναι ακόμα online συνδεόμενος στο peer server socket του.
+    Επιστρέφει True αν είναι ενεργός, False αν όχι.
+    """
+    with lock:
+        session = active_sessions.get(seller_token)
+
+    if session is None:
+        return False
+
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.settimeout(3)
+        probe.connect((session["ip"], session["port"]))
+        send_msg(probe, {"action": "check_active"})
+        resp = recv_msg(probe)
+        probe.close()
+        return resp is not None and resp.get("status") == "ok"
+    except Exception:
+        return False
+
+
+
     """Στέλνει μήνυμα σε όλους τους ενεργούς peers (εκτός από τον exclude_token)."""
     with lock:
         sessions_snapshot = dict(active_sessions)
@@ -351,8 +418,25 @@ def auction_loop():
             "duration":    duration,
         })
 
-        # ── Αναμονή μέχρι τη λήξη της δημοπρασίας ──
-        time.sleep(duration)
+        # ── Αναμονή μέχρι τη λήξη ή ακύρωση λόγω αποσύνδεσης πωλητή ──
+        seller_token = current_auction["seller_token"]
+        cancelled = False
+        elapsed = 0
+        CHECK_INTERVAL = 5   # δευτερόλεπτα μεταξύ ελέγχων
+
+        while elapsed < duration:
+            sleep_chunk = min(CHECK_INTERVAL, duration - elapsed)
+            time.sleep(sleep_chunk)
+            elapsed += sleep_chunk
+
+            # Έλεγχος αν ο πωλητής είναι ακόμα online
+            if not check_active_seller(seller_token):
+                cancel_auction("Ο πωλητής αποσυνδέθηκε.")
+                cancelled = True
+                break
+
+        if cancelled:
+            continue   # πάμε στην επόμενη δημοπρασία
 
         # ── Ανακοίνωση αποτελέσματος ──
         with lock:

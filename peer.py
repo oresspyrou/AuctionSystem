@@ -149,11 +149,22 @@ def server_listener(conn: socket.socket):
                   f"από {msg.get('bidder')} για {msg.get('object_id')}")
             print("Επιλογή: ", end="", flush=True)
 
+        elif action == "auction_cancelled":
+            print(f"\n[PEER] *** Δημοπρασία {msg.get('object_id')} ΑΚΥΡΩΘΗΚΕ ***")
+            print(f"  Λόγος: {msg.get('reason')}")
+            print("Επιλογή: ", end="", flush=True)
+
         elif action == "you_won":
             print(f"\n[PEER] *** ΚΕΡΔΙΣΕΣ τη δημοπρασία! ***")
             print(f"  Αντικείμενο : {msg.get('object_id')} | Τιμή: {msg.get('winning_bid')}")
             print(f"  Πωλητής     : {msg.get('seller_username')} "
                   f"@ {msg.get('seller_ip')}:{msg.get('seller_port')}")
+            # Εκκίνηση transaction αυτόματα σε background thread
+            threading.Thread(
+                target=do_transaction,
+                args=(msg,),
+                daemon=True
+            ).start()
             print("Επιλογή: ", end="", flush=True)
 
         elif action == "your_item_sold":
@@ -298,6 +309,70 @@ def request_auction(conn: socket.socket, objects: list):
     resp = recv_msg(conn)
     if resp:
         print(f"[PEER] RequestAuction → {resp.get('message')}")
+
+
+# ─────────────────────────────────────────────
+#  TRANSACTION — peer-to-peer αγορά
+# ─────────────────────────────────────────────
+
+def do_transaction(win_msg: dict):
+    """
+    Εκτελείται σε background thread όταν ο peer κερδίσει δημοπρασία.
+    Συνδέεται απευθείας στον πωλητή (peer-to-peer), επιβεβαιώνει
+    την αγορά και παραλαμβάνει το αρχείο metadata.
+    """
+    object_id   = win_msg.get("object_id")
+    winning_bid = win_msg.get("winning_bid")
+    seller_ip   = win_msg.get("seller_ip")
+    seller_port = win_msg.get("seller_port")
+
+    if not seller_ip or not seller_port:
+        print("[PEER] Transaction: Δεν υπάρχουν στοιχεία πωλητή.")
+        return
+
+    print(f"[PEER] Transaction: Συνδέομαι στον πωλητή {seller_ip}:{seller_port}...")
+
+    try:
+        conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        conn.settimeout(10)
+        conn.connect((seller_ip, int(seller_port)))
+
+        # Στέλνουμε αίτημα αγοράς
+        send_msg(conn, {
+            "action":      "transaction_buy",
+            "object_id":   object_id,
+            "winning_bid": winning_bid,
+            "buyer":       peer_username,
+        })
+
+        # Παραλαμβάνουμε το αρχείο metadata
+        resp = recv_msg(conn)
+        conn.close()
+
+        if resp and resp.get("status") == "ok":
+            metadata = resp.get("metadata")
+            filepath = os.path.join(SHARED_DIR, f"{object_id}.txt")
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(metadata)
+            print(f"[PEER] Transaction επιτυχής! Αρχείο αποθηκεύτηκε: {filepath}")
+
+            # Ενημέρωση server ότι ο αγοραστής έχει πλέον το αντικείμενο
+            notify_server_bought(object_id)
+        else:
+            print(f"[PEER] Transaction απέτυχε: {resp.get('message') if resp else 'Χωρίς απόκριση'}")
+
+    except Exception as e:
+        print(f"[PEER] Transaction error: {e}")
+
+
+def notify_server_bought(object_id: str):
+    """Ενημερώνει τον server ότι ο αγοραστής έχει παραλάβει το αντικείμενο."""
+    send_msg(server_conn, {
+        "action":    "confirm_purchase",
+        "token_id":  token_id,
+        "object_id": object_id,
+    })
+    # Η απάντηση θα έρθει ως push μήνυμα — δεν χρειάζεται recv εδώ
 
 
 # ─────────────────────────────────────────────
