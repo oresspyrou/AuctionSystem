@@ -455,16 +455,18 @@ def auction_loop():
               f"Διάρκεια: {duration}s ***")
 
         # Ενημερώνουμε όλους τους peers για τη νέα δημοπρασία
+        # Χρησιμοποιούμε το item dict (όχι current_auction) για να αποφύγουμε
+        # race condition αν cancel_auction κληθεί από άλλο thread
         broadcast_to_active_peers({
             "action":      "new_auction",
-            "object_id":   current_auction["object_id"],
-            "description": current_auction["description"],
-            "start_bid":   current_auction["start_bid"],
+            "object_id":   item["object_id"],
+            "description": item.get("description", ""),
+            "start_bid":   float(item.get("start_bid", 0)),
             "duration":    duration,
         })
 
         # ── Αναμονή μέχρι τη λήξη ή ακύρωση λόγω αποσύνδεσης πωλητή ──
-        seller_token = current_auction["seller_token"]
+        seller_token = item["seller_token"]
         cancelled = False
         elapsed = 0
         CHECK_INTERVAL = 5   # δευτερόλεπτα μεταξύ ελέγχων
