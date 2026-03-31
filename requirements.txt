@@ -1,0 +1,3 @@
+# No external dependencies required.
+# Uses only Python standard library (socket, threading, json, random, time, os).
+# Requires Python >= 3.10
