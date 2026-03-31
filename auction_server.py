@@ -347,19 +347,16 @@ def handle_place_bid(conn, msg):
 def handle_confirm_purchase(conn, msg):
     """
     Ο αγοραστής ενημερώνει τον server ότι παρέλαβε το αντικείμενο.
-    Ο server ενημερώνει τις δομές δεδομένων.
+    Δεν στέλνει ΠΟΤΕ απάντηση — ο peer δεν κάνει recv για αυτό το μήνυμα.
+    Αν στελνόταν απάντηση, θα μόλυνε το response_queue του peer.
     """
     token     = msg.get("token_id", "")
     object_id = msg.get("object_id", "")
 
     with lock:
-        if token not in active_sessions:
-            send_msg(conn, {"status": "error", "message": "Μη έγκυρο token_id."})
-            return
-        username = active_sessions[token]["username"]
+        username = active_sessions.get(token, {}).get("username", "άγνωστος")
 
     print(f"[SERVER] Επιβεβαίωση αγοράς: {username} παρέλαβε {object_id}")
-    # Δεν στέλνουμε απάντηση — ο peer δεν περιμένει recv για αυτό το μήνυμα
 
 
 def cancel_auction(reason: str):
