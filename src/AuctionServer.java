@@ -21,7 +21,7 @@ public class AuctionServer {
     String currentObjectId = null;
     String currentDescription = null;
     String sellerTokenId = null;
-    double trexousaBid = 0;
+    double currentBid = 0;
     String highestBidderTokenId = null;
     long auctionEndTime = 0;
     Object auctionLock = new Object();
@@ -203,7 +203,7 @@ public class AuctionServer {
             long timeLeft = (auctionEndTime - System.currentTimeMillis()) / 1000;
             if (timeLeft < 0) timeLeft = 0;
 
-            return "AUCTION_DETAILS|" + sellerTokenId + "|" + trexousaBid + "|" + timeLeft;
+            return "AUCTION_DETAILS|" + sellerTokenId + "|" + currentBid + "|" + timeLeft;
         }
     }
 
@@ -220,12 +220,12 @@ public class AuctionServer {
                 return "BID_FAIL|Auction has ended";
             }
 
-            if (bidAmount <= trexousaBid) {
-                return "BID_FAIL|Bid too low, current highest is " + trexousaBid;
+            if (bidAmount <= currentBid) {
+                return "BID_FAIL|Bid too low, current highest is " + currentBid;
             }
 
             // accept the bid
-            trexousaBid = bidAmount;
+            currentBid = bidAmount;
             highestBidderTokenId = tokenId;
 
             log("New bid on " + objectId + ": " + bidAmount + " by " + tokenId);
@@ -287,7 +287,7 @@ public class AuctionServer {
                 currentObjectId = null;
                 currentDescription = null;
                 sellerTokenId = null;
-                trexousaBid = 0;
+                currentBid = 0;
                 highestBidderTokenId = null;
                 auctionEndTime = 0;
 

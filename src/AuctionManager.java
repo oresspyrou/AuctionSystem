@@ -31,7 +31,7 @@ public class AuctionManager extends Thread {
                     server.currentObjectId = item.objectId;
                     server.currentDescription = item.description;
                     server.sellerTokenId = item.sellerTokenId;
-                    server.trexousaBid = item.startBid;
+                    server.currentBid = item.startBid;
                     server.highestBidderTokenId = null;
                     server.auctionEndTime = System.currentTimeMillis() + item.duration * 1000L;
                 }
@@ -70,7 +70,7 @@ public class AuctionManager extends Thread {
                     if (server.highestBidderTokenId != null) {
                         // someone won
                         String winnerId = server.highestBidderTokenId;
-                        double finalBid = server.trexousaBid;
+                        double finalBid = server.currentBid;
                         String sellerId = server.sellerTokenId;
 
                         server.log("=== AUCTION END === " + item.objectId
@@ -110,7 +110,7 @@ public class AuctionManager extends Thread {
                     server.currentObjectId = null;
                     server.currentDescription = null;
                     server.sellerTokenId = null;
-                    server.trexousaBid = 0;
+                    server.currentBid = 0;
                     server.highestBidderTokenId = null;
                     server.auctionEndTime = 0;
                 }
