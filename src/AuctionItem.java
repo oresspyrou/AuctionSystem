@@ -29,24 +29,30 @@ public class AuctionItem {
 
     // parse from the semicolon format used in protocol messages
     public static AuctionItem fromProtocolString(String s) {
-        String[] parts = s.split(";");
-        // if the message doesn't have all 4 parts, it's invalid
-        if (parts.length < 4) return null;
-        
-        // data cleaning - trim whitespace and parse numbers
-        String id = parts[0].trim();
-        String desc = parts[1].trim();
-        double bid = Double.parseDouble(parts[2].trim());
-        int dur = Integer.parseInt(parts[3].trim());
+        try {
+            String[] parts = s.split(";");
+            if (parts.length < 4) return null;
 
-        return new AuctionItem(id, desc, bid, dur);
+            String id = parts[0].trim();
+            String desc = parts[1].trim();
+            double bid = Double.parseDouble(parts[2].trim());
+            int dur = Integer.parseInt(parts[3].trim());
+
+            if (bid < 0 || dur <= 0) return null;
+            return new AuctionItem(id, desc, bid, dur);
+        } catch (NumberFormatException e) {
+            return null; // ignores malformed numbers
+        }
+
     }
 
     // save to file in the assignment's format
     public void saveToFile(String path) throws IOException {
         FileWriter fw = new FileWriter(path);
-        fw.write("object_id: " + objectId + "; description: " + description
-                + "; start_bid: " + startBid + "; auction_duration: " + duration);
+        fw.write("object_id: " + objectId + 
+                     "; description: \"" + description + "\"" + 
+                     "; start_bid: \"" + startBid + "\"" + 
+                     "; auction_duration: \"" + duration + "\"");
         fw.close();
     }
 
@@ -63,21 +69,20 @@ public class AuctionItem {
     // parse the "object_id: X; description: Y; start_bid: Z; auction_duration: W" format
     // helps in robustness, security and following the formats specified in the assignment
     private static AuctionItem parseFromFileFormat(String line) {
-        // split by "; " to get each key-value pair
-        String[] parts = line.split("; ");
+    String[] parts = line.split("; ");
+    String id = null, desc = null;
+    double bid = 0;
+    int dur = 0;
 
-        String id = null;
-        String desc = null;
-        double bid = 0;
-        int dur = 0;
+    for (String part : parts) {
+        String[] kv = part.split(": ", 2);
+        if (kv.length < 2) continue;
 
-        for (String part : parts) {
-            String[] kv = part.split(": ", 2);
-            if (kv.length < 2) continue;
+        String key = kv[0].trim();
+        // Αφαίρεση εισαγωγικών από την τιμή, αν υπάρχουν
+        String value = kv[1].trim().replace("\"", ""); 
 
-            String key = kv[0].trim();
-            String value = kv[1].trim();
-
+        try {
             if (key.equals("object_id")) {
                 id = value;
             } else if (key.equals("description")) {
@@ -87,11 +92,16 @@ public class AuctionItem {
             } else if (key.equals("auction_duration")) {
                 dur = Integer.parseInt(value);
             }
+        } catch (NumberFormatException e) {
+            // Αν η τιμή δεν είναι αριθμός, αγνόησε το πεδίο ή κατάγραψε το σφάλμα
+            continue; 
         }
-
-        if (id == null) return null;
-        return new AuctionItem(id, desc, bid, dur);
     }
+
+    // Έλεγχος εγκυρότητας (π.χ. θετικές τιμές)
+    if (id == null || bid < 0 || dur <= 0) return null;
+    return new AuctionItem(id, desc, bid, dur);
+}
 
     @Override
     public String toString() {
