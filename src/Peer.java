@@ -188,7 +188,8 @@ public class Peer {
         }
 
         if (itemsStr.length() > 0) {
-            String msg = "REQUEST_AUCTION|" + getTokenId() + "|" + Config.SERVER_HOST + "|" + peerPort + "|" + itemsStr;
+            String myIp = getMyIpAddress();
+            String msg = "REQUEST_AUCTION|" + getTokenId() + "|" + myIp + "|" + peerPort + "|" + itemsStr;
             String response = sendToServer(msg);
             log("Sent existing items to server: " + response);
         }
@@ -199,7 +200,7 @@ public class Peer {
         String token = getTokenId();
         if (token == null) return;
 
-        String msg = "REQUEST_AUCTION|" + token + "|" + Config.SERVER_HOST + "|" + peerPort + "|" + item.toProtocolString();
+        String msg = "REQUEST_AUCTION|" + token + "|" + getMyIpAddress() + "|" + peerPort + "|" + item.toProtocolString();
         String response = sendToServer(msg);
         log("Sent new item " + item.objectId + " to server: " + response);
     }
@@ -215,6 +216,14 @@ public class Peer {
         File[] files = dir.listFiles();
         int count = (files != null) ? files.length : 0;
         log("Items in shared_directory: " + count);
+    }
+
+    private String getMyIpAddress() {
+        try {
+            return InetAddress.getLocalHost().getHostAddress();
+        } catch (UnknownHostException e) {
+            return "127.0.0.1";
+        }
     }
 
     // open a connection to the server, send a message, get the response
