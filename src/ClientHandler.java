@@ -18,9 +18,10 @@ public class ClientHandler extends Thread {
             DataInputStream in = new DataInputStream(socket.getInputStream());
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
 
-            // read the request
+            // read the request sent by the peer
             String message = MessageHelper.receiveMessage(in);
             String[] parts = message.split("\\|");
+            // the first part is the command type, the rest are arguments
             String type = parts[0];
 
             String response = "";
@@ -59,6 +60,7 @@ public class ClientHandler extends Thread {
                     break;
             }
 
+            // send the result back to the peer
             MessageHelper.sendMessage(out, response);
 
         } catch (IOException e) {

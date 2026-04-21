@@ -1,21 +1,22 @@
 import java.io.*;
 import java.net.*;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class AuctionServer {
 
     // registered users: username -> [password, numSeller, numBidder]
-    HashMap<String, String[]> registeredUsers = new HashMap<>();
+    private Map<String, String[]> registeredUsers = new ConcurrentHashMap<>();
 
     // currently connected peers: tokenId -> PeerInfo
-    HashMap<String, PeerInfo> activePeers = new HashMap<>();
+    Map<String, PeerInfo> activePeers = new ConcurrentHashMap<>();
 
     // items waiting to be auctioned, FCFS order
     ArrayList<AuctionItem> auctionQueue = new ArrayList<>();
 
     // all items submitted by each peer: tokenId -> list of items
     // this is separate from the queue - it tracks who has what
-    HashMap<String, ArrayList<AuctionItem>> peerItems = new HashMap<>();
+    private Map<String, List<AuctionItem>> peerItems = new ConcurrentHashMap<>();
 
     // current auction state - all access through synchronized(auctionLock)
     String currentObjectId = null;
@@ -56,15 +57,12 @@ public class AuctionServer {
     // --- register / login / logout ---
 
     public String register(String username, String password) {
-        synchronized (registeredUsers) {
-            if (registeredUsers.containsKey(username)) {
-                return "REGISTER_FAIL|Username already exists";
-            }
-            // store as [password, numSeller, numBidder]
-            registeredUsers.put(username, new String[]{password, "0", "0"});
-            log("Registered new user: " + username);
-            return "REGISTER_OK|Account created";
+        String[] existing = registeredUsers.putIfAbsent(username, new String[]{password, "0", "0"});
+        if (existing != null) {
+            return "REGISTER_FAIL|Username already exists";
         }
+        log("Registered new user: " + username);
+        return "REGISTER_OK|Account created";
     }
 
     public String login(String username, String password, String ipAddress) {
@@ -115,56 +113,48 @@ public class AuctionServer {
         synchronized (auctionQueue) {
             auctionQueue.add(item);
             log("Item added to queue: " + item.objectId + " by seller " + item.sellerTokenId);
-            auctionQueue.notifyAll(); // wake up the AuctionManager if it's waiting
-        }
+            auctionQueue.notifyAll();
+        } 
 
-        // also track it in the peer's item list
-        synchronized (peerItems) {
-            ArrayList<AuctionItem> items = peerItems.get(item.sellerTokenId);
-            if (items == null) {
-                items = new ArrayList<>();
-                peerItems.put(item.sellerTokenId, items);
-            }
-            items.add(item);
-        }
-    }
+        // Ατομική προσθήκη στη λίστα του peer μέσω CHM
+        peerItems.computeIfAbsent(item.sellerTokenId, k -> Collections.synchronizedList(new ArrayList<>()))
+                 .add(item);
+    } 
 
-    // remove an item from a peer's item list (after it's sold or transferred)
     public void removeItemFromPeer(String tokenId, String objectId) {
-        synchronized (peerItems) {
-            ArrayList<AuctionItem> items = peerItems.get(tokenId);
-            if (items != null) {
-                for (int i = 0; i < items.size(); i++) {
-                    if (items.get(i).objectId.equals(objectId)) {
-                        items.remove(i);
-                        break;
-                    }
+    // Χρησιμοποιούμε το List interface για να αποφύγουμε το Type Mismatch
+    List<AuctionItem> items = peerItems.get(tokenId); 
+    
+    if (items != null) {
+        // Κλειδώνουμε μόνο τη συγκεκριμένη λίστα και όχι όλο το Map
+        synchronized (items) { 
+            for (int i = 0; i < items.size(); i++) {
+                if (items.get(i).objectId.equals(objectId)) {
+                    items.remove(i);
+                    log("Removed item " + objectId + " from peer " + tokenId);
+                    break;
                 }
             }
         }
     }
+}
+   public String handleRequestAuction(String tokenId, String ipAddress, int port, String[] itemStrings) {
+    synchronized (activePeers) {
+        PeerInfo peer = activePeers.get(tokenId);
+        if (peer == null) return "REQUEST_AUCTION_FAIL|Not logged in";
+        peer.ipAddress = ipAddress;
+        peer.port = port;
+    }
 
-    public String handleRequestAuction(String tokenId, String ipAddress, int port, String[] itemStrings) {
-        // update peer's connection info
-        synchronized (activePeers) {
-            PeerInfo peer = activePeers.get(tokenId);
-            if (peer == null) {
-                return "REQUEST_AUCTION_FAIL|Not logged in";
-            }
-            peer.ipAddress = ipAddress;
-            peer.port = port;
+    for (String itemStr : itemStrings) {
+        // Μετατροπή String -> AuctionItem
+        AuctionItem item = AuctionItem.fromProtocolString(itemStr);
+        if (item != null) {
+            item.sellerTokenId = tokenId;
+            addItemToQueue(item); // Η addItemToQueue θα το βάλει τώρα στο σωστό peerItems Map
         }
-
-        // parse and add each item to the queue
-        for (String itemStr : itemStrings) {
-            AuctionItem item = AuctionItem.fromProtocolString(itemStr);
-            if (item != null) {
-                item.sellerTokenId = tokenId;
-                addItemToQueue(item);
-            }
-        }
-
-        return "REQUEST_AUCTION_OK|Items received";
+    }
+    return "REQUEST_AUCTION_OK|Items received";
     }
 
     // --- auction queries ---
@@ -246,8 +236,7 @@ public class AuctionServer {
         }
         if (peer == null) return false;
 
-        try {
-            Socket checkSocket = new Socket();
+        try (Socket checkSocket = new Socket()) {
             checkSocket.connect(new InetSocketAddress(peer.ipAddress, peer.port), Config.CHECK_ACTIVE_TIMEOUT);
             checkSocket.setSoTimeout(Config.CHECK_ACTIVE_TIMEOUT);
 
@@ -256,8 +245,6 @@ public class AuctionServer {
 
             MessageHelper.sendMessage(out, "CHECK_ACTIVE|ping");
             String response = MessageHelper.receiveMessage(in);
-
-            checkSocket.close();
 
             if (response != null && response.startsWith("CHECK_ACTIVE_ACK")) {
                 return true;
@@ -354,15 +341,18 @@ public class AuctionServer {
         }
 
         // also update the registered users record
-        if (username != null) {
-            synchronized (registeredUsers) {
-                String[] userData = registeredUsers.get(username);
-                if (userData != null) {
-                    if (isSeller) {
-                        userData[1] = String.valueOf(Integer.parseInt(userData[1]) + 1);
-                    } else {
-                        userData[2] = String.valueOf(Integer.parseInt(userData[2]) + 1);
-                    }
+        String[] userData = registeredUsers.get(username);
+
+        if (userData != null) {
+            // Κλειδώνουμε ΜΟΝΟ τον συγκεκριμένο πίνακα δεδομένων του χρήστη.
+            // Έτσι, αν την ίδια στιγμή ενημερώνεται ένας ΑΛΛΟΣ χρήστης, δεν περιμένει καθόλου.
+            synchronized (userData) { 
+                if (isSeller) {
+                    int currentVal = Integer.parseInt(userData[1]);
+                    userData[1] = String.valueOf(currentVal + 1);
+                } else {
+                    int currentVal = Integer.parseInt(userData[2]);
+                    userData[2] = String.valueOf(currentVal + 1);
                 }
             }
         }
