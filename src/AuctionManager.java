@@ -1,6 +1,5 @@
 import java.util.*;
 
-// runs in its own thread, picks items from the queue and runs auctions one at a time
 public class AuctionManager extends Thread {
 
     private AuctionServer server;
@@ -8,7 +7,7 @@ public class AuctionManager extends Thread {
 
     public AuctionManager(AuctionServer server) {
         this.server = server;
-        this.setDaemon(true); // so it doesn't block shutdown
+        this.setDaemon(true);
     }
 
     @Override
@@ -17,7 +16,6 @@ public class AuctionManager extends Thread {
 
         while (running) {
             try {
-                // wait for an item to appear in the queue
                 AuctionItem item = null;
                 synchronized (server.auctionQueue) {
                     while (server.auctionQueue.isEmpty()) {
@@ -26,7 +24,6 @@ public class AuctionManager extends Thread {
                     item = server.auctionQueue.remove(0);
                 }
 
-                // set up the auction
                 synchronized (server.auctionLock) {
                     server.currentObjectId = item.objectId;
                     server.currentDescription = item.description;
@@ -36,53 +33,36 @@ public class AuctionManager extends Thread {
                     server.auctionEndTime = System.currentTimeMillis() + item.duration * 1000L;
                 }
 
-                // count this auction for the seller
                 server.incrementCounter(item.sellerTokenId, true);
 
-                server.log("=== AUCTION START === " + item.objectId
-                        + " | " + item.description
-                        + " | starting bid: " + item.startBid
-                        + " | duration: " + item.duration + "s");
+                server.log("=== AUCTION START === " + item.objectId);
+                
+                // ΒΕΛΤΙΩΣΗ: Ενημέρωση όλων των Peers ότι ξεκίνησε δημοπρασία
+                server.broadcastToAll("AUCTION_START|" + item.objectId + "|" + item.description + "|" + item.startBid);
 
-                // wait until the auction timer runs out
-                // we check every second
                 while (true) {
                     long timeLeft;
                     synchronized (server.auctionLock) {
                         timeLeft = server.auctionEndTime - System.currentTimeMillis();
-                        // if auction was cancelled (e.g. seller disconnected), stop waiting
-                        if (server.currentObjectId == null) {
-                            server.log("=== AUCTION CANCELLED === " + item.objectId);
-                            break;
-                        }
+                        if (server.currentObjectId == null) break; 
                     }
                     if (timeLeft <= 0) break;
                     Thread.sleep(1000);
                 }
 
-                // auction is over, figure out the result
                 synchronized (server.auctionLock) {
-                    // could have been cancelled already
-                    if (server.currentObjectId == null) {
-                        continue;
-                    }
+                    if (server.currentObjectId == null) continue;
 
                     if (server.highestBidderTokenId != null) {
-                        // someone won
                         String winnerId = server.highestBidderTokenId;
                         double finalBid = server.currentBid;
                         String sellerId = server.sellerTokenId;
 
-                        server.log("=== AUCTION END === " + item.objectId
-                                + " won by " + winnerId + " for " + finalBid);
+                        server.log("=== AUCTION END === " + item.objectId + " won by " + winnerId);
 
-                        // get seller info to send to winner
-                        PeerInfo sellerInfo;
-                        synchronized (server.activePeers) {
-                            sellerInfo = server.activePeers.get(sellerId);
-                        }
+                        // ΒΕΛΤΙΩΣΗ: Δεν χρειάζεται synchronized εδώ λόγω ConcurrentHashMap
+                        PeerInfo sellerInfo = server.activePeers.get(sellerId);
 
-                        // tell the winner
                         if (sellerInfo != null) {
                             String wonMsg = "AUCTION_WON|" + item.objectId + "|" + finalBid
                                     + "|" + sellerInfo.ipAddress + "|" + sellerInfo.port
@@ -90,23 +70,23 @@ public class AuctionManager extends Thread {
                             server.sendToPeer(winnerId, wonMsg);
                         }
 
-                        // tell the seller
-                        String soldMsg = "AUCTION_SOLD|" + item.objectId + "|" + finalBid
-                                + "|" + winnerId;
+                        String soldMsg = "AUCTION_SOLD|" + item.objectId + "|" + finalBid + "|" + winnerId;
                         server.sendToPeer(sellerId, soldMsg);
 
-                        // update bidder counter and remove item from seller's list
                         server.incrementCounter(winnerId, false);
                         server.removeItemFromPeer(sellerId, item.objectId);
+                        
+                        // Ενημέρωση όλων για το κλείσιμο
+                        server.broadcastToAll("AUCTION_CLOSED|" + item.objectId + "|Winner: " + winnerId);
 
                     } else {
-                        // no bids were placed
-                        server.log("=== AUCTION END === " + item.objectId + " - no bids received");
-                        server.sendToPeer(server.sellerTokenId,
-                                "AUCTION_ENDED|" + item.objectId + "|No bids received");
+                        server.log("=== AUCTION END === " + item.objectId + " - no bids");
+                        
+                        // Ενημέρωση όλων ότι έληξε χωρίς νικητή
+                        server.broadcastToAll("AUCTION_CLOSED|" + item.objectId + "|No bids received");
                     }
 
-                    // clear auction state
+                    // Reset state
                     server.currentObjectId = null;
                     server.currentDescription = null;
                     server.sellerTokenId = null;
