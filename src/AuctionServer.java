@@ -361,6 +361,12 @@ public class AuctionServer {
 
     public void log(String msg) {
         String time = new java.text.SimpleDateFormat("HH:mm:ss").format(new Date());
-        System.out.println("[SERVER " + time + "] " + msg);
+        String formattedMsg = "[SERVER " + time + "] " + msg;
+        System.out.println(formattedMsg);
+        try (PrintWriter out = new PrintWriter(new BufferedWriter(new FileWriter("auction_server.log", true)))) {
+            out.println(formattedMsg);
+        } catch (IOException e) {
+            System.err.println("Could not write to log file: " + e.getMessage());
+        }
     }
 }

@@ -2,3 +2,5 @@ out/
 shared_directories/
 .DS_Store
 *.class
+
+*.log
