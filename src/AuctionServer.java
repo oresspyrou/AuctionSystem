@@ -193,7 +193,8 @@ public class AuctionServer {
             long timeLeft = (auctionEndTime - System.currentTimeMillis()) / 1000;
             if (timeLeft < 0) timeLeft = 0;
 
-            return "AUCTION_DETAILS|" + sellerTokenId + "|" + currentBid + "|" + timeLeft;
+            String bidder = (highestBidderTokenId != null) ? highestBidderTokenId : "";
+            return "AUCTION_DETAILS|" + sellerTokenId + "|" + currentBid + "|" + timeLeft + "|" + bidder;
         }
     }
 

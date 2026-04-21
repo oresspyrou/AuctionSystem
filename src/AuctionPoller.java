@@ -71,15 +71,21 @@ public class AuctionPoller extends Thread {
                     continue;
                 }
 
-                // AUCTION_DETAILS|seller_token|highest_bid|time_remaining
+                // AUCTION_DETAILS|seller_token|highest_bid|time_remaining|highest_bidder_token
                 String[] detailParts = detailsResponse.split("\\|");
                 if (detailParts.length < 4) continue;
 
                 String sellerToken = detailParts[1];
                 double highestBid = Double.parseDouble(detailParts[2]);
                 long timeLeft = Long.parseLong(detailParts[3]);
+                String highestBidderToken = (detailParts.length >= 5) ? detailParts[4] : "";
 
                 peer.log("Details: highest bid=" + highestBid + ", time left=" + timeLeft + "s");
+
+                if (token.equals(highestBidderToken)) {
+                    peer.log("Already the highest bidder on " + objectId + ", skipping");
+                    continue;
+                }
 
                 if (timeLeft <= 0) {
                     peer.log("Auction already ended, skipping");
