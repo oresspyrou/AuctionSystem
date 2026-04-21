@@ -136,19 +136,13 @@ public class PeerServer extends Thread {
             if (response != null && response.startsWith("TRANSACTION_RESPONSE")) {
                 String[] respParts = response.split("\\|", 3);
                 if (respParts.length >= 3) {
-                    // save the metadata file to our shared_directory
-                    String metadata = respParts[2];
-                    String filePath = peer.sharedDir + "/" + objectId + ".txt";
-
-                    FileWriter fw = new FileWriter(filePath);
-                    fw.write(metadata);
-                    fw.close();
-
-                    peer.log("Saved " + objectId + " metadata to " + filePath);
-
-                    // tell the server we now own this item
-                    AuctionItem item = AuctionItem.parseFromFile(filePath);
+                    AuctionItem item = AuctionItem.fromProtocolString(respParts[2]);
                     if (item != null) {
+                        // save to file in the standard file format
+                        String filePath = peer.sharedDir + "/" + objectId + ".txt";
+                        item.saveToFile(filePath);
+                        peer.log("Saved " + objectId + " metadata to " + filePath);
+
                         synchronized (peer.myItems) {
                             peer.myItems.add(objectId);
                         }
@@ -192,12 +186,7 @@ public class PeerServer extends Thread {
                 // read the metadata and send it
                 AuctionItem item = AuctionItem.parseFromFile(filePath);
                 if (item != null) {
-                    String fileContent = "object_id: " + item.objectId
-                            + "; description: " + item.description
-                            + "; start_bid: " + item.startBid
-                            + "; auction_duration: " + item.duration;
-
-                    MessageHelper.sendMessage(out, "TRANSACTION_RESPONSE|" + objectId + "|" + fileContent);
+                    MessageHelper.sendMessage(out, "TRANSACTION_RESPONSE|" + objectId + "|" + item.toProtocolString());
 
                     // delete the file from our shared_directory
                     file.delete();
