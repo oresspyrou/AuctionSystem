@@ -30,12 +30,15 @@ public class AuctionItem {
     // parse from the semicolon format used in protocol messages
     public static AuctionItem fromProtocolString(String s) {
         String[] parts = s.split(";");
+        // if the message doesn't have all 4 parts, it's invalid
         if (parts.length < 4) return null;
-
+        
+        // data cleaning - trim whitespace and parse numbers
         String id = parts[0].trim();
         String desc = parts[1].trim();
         double bid = Double.parseDouble(parts[2].trim());
         int dur = Integer.parseInt(parts[3].trim());
+
         return new AuctionItem(id, desc, bid, dur);
     }
 
@@ -47,7 +50,7 @@ public class AuctionItem {
         fw.close();
     }
 
-    // read from file in the assignment's format
+    // create an AuctionItem from a file containing a single line in the assignment's format
     public static AuctionItem parseFromFile(String path) throws IOException {
         BufferedReader br = new BufferedReader(new FileReader(path));
         String line = br.readLine();
@@ -58,6 +61,7 @@ public class AuctionItem {
     }
 
     // parse the "object_id: X; description: Y; start_bid: Z; auction_duration: W" format
+    // helps in robustness, security and following the formats specified in the assignment
     private static AuctionItem parseFromFileFormat(String line) {
         // split by "; " to get each key-value pair
         String[] parts = line.split("; ");
